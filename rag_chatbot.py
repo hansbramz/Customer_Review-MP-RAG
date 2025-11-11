@@ -52,8 +52,7 @@ def fetch_product_data_from_mysql() -> List[Dict]:
         
     st.sidebar.info("Attempting to connect to MySQL and aggregate data...")
     
-    # SQL Aggregation Query
-    # This query groups by product and calculates the required RAG fields 
+    # SQL Aggregation Query - FIXED VERSION
     aggregation_query = text(f"""
         SELECT
             product_name,
@@ -62,10 +61,14 @@ def fetch_product_data_from_mysql() -> List[Dict]:
             COUNT(id) AS review_count,
             AVG(rating) AS avg_rating,
             AVG(sentiment_score) AS aggregate_sentiment_score,
-            -- Concatenate up to 10 distinct emotion labels for the RAG chunk
-            GROUP_CONCAT(DISTINCT emotion_label SEPARATOR ', ' LIMIT 10) AS unique_emotions_summary,
-            -- Concatenate review snippets
-            SUBSTRING(GROUP_CONCAT(review_text SEPARATOR ' | ') FROM 1 FOR 250) AS review_snippet
+            SUBSTRING(
+                GROUP_CONCAT(DISTINCT emotion_label ORDER BY emotion_label SEPARATOR ', '),
+                1, 200
+            ) AS unique_emotions_summary,
+            SUBSTRING(
+                GROUP_CONCAT(review_text SEPARATOR ' | '),
+                1, 250
+            ) AS review_snippet
         FROM {TABLE_NAME}
         GROUP BY product_id, product_name, Brand
         HAVING COUNT(id) > 0
@@ -132,7 +135,7 @@ def create_product_knowledge_base(data: List[Dict], embeddings_model) -> Optiona
             f"Key Customer Emotion Summary: {item['emotion_summary']}" 
         )
         texts_to_embed.append(context)
-        knowledge_base.append({"id": item['id'], "name": item['name'], 'context': context}) # Fixed dictionary keys
+        knowledge_base.append({"id": item['id'], "name": item['name'], 'context': context})
         
 
     st.sidebar.info(f"Simulating Vector Embedding and Indexing for {len(data)} products...")
@@ -216,7 +219,7 @@ def generate_response(query: str, context: str):
     # User Query combining context and question
     user_query = f"{context}\n\nUser Question: {query}"
     
-    model_name = "gemini-2.5-flash-preview-09-2025" 
+    model_name = "gemini-2.0-flash-exp"
     apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={apiKey}"
 
     payload = {
