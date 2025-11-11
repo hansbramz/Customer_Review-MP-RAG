@@ -3,11 +3,9 @@ import json
 import time
 import requests
 from typing import List, Dict, Optional
-# --- New Database Imports ---
 import pandas as pd
 from sqlalchemy import create_engine, text, func 
 from sqlalchemy.exc import SQLAlchemyError
-# --- End New Database Imports ---
 
 # --- Load Secrets from Streamlit (st.secrets) ---
 try:
@@ -21,9 +19,8 @@ try:
 except KeyError as e:
     st.error(f"Configuration error: Missing key {e} in secrets.toml. Please check your secrets file.")
     st.stop()
-# --- End Load Secrets ---
 
-# --- Connection and Aggregation Functions ---
+# --- Connection Functions ---
 
 def initialize_mysql_engine():
     """Initializes and returns the SQLAlchemy engine using user's credentials."""
@@ -37,21 +34,147 @@ def initialize_mysql_engine():
         print(f"ERROR: Could not initialize MySQL Engine. Error: {e}")
         return None
 
-# 1. Aggregated Data Source (Live Fetch) - ENHANCED VERSION
+# --- ENHANCED DATA FETCHING WITH ANALYTICS ---
+
+def fetch_analytical_insights() -> Dict:
+    """
+    Fetches comprehensive analytical insights from the database.
+    Returns aggregated statistics for deeper analysis.
+    """
+    engine = initialize_mysql_engine()
+    if not engine:
+        return {}
+    
+    insights = {}
+    
+    try:
+        with engine.connect() as connection:
+            # 1. Overall Statistics
+            overall_query = text(f"""
+                SELECT 
+                    COUNT(DISTINCT product_id) as total_products,
+                    COUNT(*) as total_reviews,
+                    AVG(rating) as avg_rating,
+                    AVG(sentiment_score) as avg_sentiment,
+                    COUNT(CASE WHEN rating <= 2 THEN 1 END) as negative_reviews,
+                    COUNT(CASE WHEN rating >= 4 THEN 1 END) as positive_reviews
+                FROM {TABLE_NAME}
+            """)
+            result = connection.execute(overall_query).fetchone()
+            insights['overall'] = dict(result._mapping) if result else {}
+            
+            # 2. Top Complained Products (Low ratings)
+            complaints_query = text(f"""
+                SELECT 
+                    product_name,
+                    Brand,
+                    COUNT(*) as complaint_count,
+                    AVG(rating) as avg_rating,
+                    AVG(sentiment_score) as avg_sentiment,
+                    GROUP_CONCAT(DISTINCT emotion_label SEPARATOR ', ') as common_emotions
+                FROM {TABLE_NAME}
+                WHERE rating <= 2
+                GROUP BY product_name, Brand
+                ORDER BY complaint_count DESC
+                LIMIT 10
+            """)
+            result = connection.execute(complaints_query).fetchall()
+            insights['top_complaints'] = [dict(row._mapping) for row in result]
+            
+            # 3. Best Rated Products
+            best_products_query = text(f"""
+                SELECT 
+                    product_name,
+                    Brand,
+                    COUNT(*) as review_count,
+                    AVG(rating) as avg_rating,
+                    AVG(sentiment_score) as avg_sentiment,
+                    GROUP_CONCAT(DISTINCT emotion_label SEPARATOR ', ') as common_emotions
+                FROM {TABLE_NAME}
+                WHERE rating >= 4
+                GROUP BY product_name, Brand
+                HAVING COUNT(*) >= 3
+                ORDER BY avg_sentiment DESC, avg_rating DESC
+                LIMIT 10
+            """)
+            result = connection.execute(best_products_query).fetchall()
+            insights['best_products'] = [dict(row._mapping) for row in result]
+            
+            # 4. Emotion Analysis
+            emotion_query = text(f"""
+                SELECT 
+                    emotion_label,
+                    COUNT(*) as count,
+                    AVG(rating) as avg_rating,
+                    GROUP_CONCAT(DISTINCT product_name SEPARATOR ' | ' LIMIT 5) as sample_products
+                FROM {TABLE_NAME}
+                WHERE emotion_label IS NOT NULL
+                GROUP BY emotion_label
+                ORDER BY count DESC
+            """)
+            result = connection.execute(emotion_query).fetchall()
+            insights['emotions'] = [dict(row._mapping) for row in result]
+            
+            # 5. Common Complaint Keywords (from negative reviews)
+            complaint_keywords_query = text(f"""
+                SELECT 
+                    review_text,
+                    product_name,
+                    rating,
+                    emotion_label
+                FROM {TABLE_NAME}
+                WHERE rating <= 2 
+                AND review_text IS NOT NULL
+                ORDER BY review_date DESC
+                LIMIT 50
+            """)
+            result = connection.execute(complaint_keywords_query).fetchall()
+            insights['complaint_samples'] = [dict(row._mapping) for row in result]
+            
+            # 6. Sales Channel Performance
+            channel_query = text(f"""
+                SELECT 
+                    sales_channel,
+                    COUNT(*) as review_count,
+                    AVG(rating) as avg_rating,
+                    AVG(sentiment_score) as avg_sentiment
+                FROM {TABLE_NAME}
+                GROUP BY sales_channel
+            """)
+            result = connection.execute(channel_query).fetchall()
+            insights['channel_performance'] = [dict(row._mapping) for row in result]
+            
+            # 7. Rating Distribution
+            rating_dist_query = text(f"""
+                SELECT 
+                    rating,
+                    COUNT(*) as count,
+                    ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM {TABLE_NAME}), 2) as percentage
+                FROM {TABLE_NAME}
+                GROUP BY rating
+                ORDER BY rating DESC
+            """)
+            result = connection.execute(rating_dist_query).fetchall()
+            insights['rating_distribution'] = [dict(row._mapping) for row in result]
+            
+        st.sidebar.success("✅ Analytical insights loaded successfully")
+        return insights
+        
+    except Exception as e:
+        st.error(f"Error fetching analytical insights: {e}")
+        return {}
+
 def fetch_product_data_from_mysql() -> List[Dict]:
     """
     Connects to MySQL, aggregates review data by product, and returns RAG documents.
-    Returns an empty list and displays an error if connection or query fails.
     """
-    
     engine = initialize_mysql_engine()
     if not engine:
-        st.error("MySQL connection initialization failed. Cannot proceed without data.")
+        st.error("MySQL connection initialization failed.")
         return [] 
         
-    st.sidebar.info("🔄 Fetching ALL product data from MySQL...")
+    st.sidebar.info("🔄 Fetching product data from MySQL...")
     
-    # SQL Aggregation Query - Fetch ALL products without LIMIT
     aggregation_query = text(f"""
         SELECT
             product_name,
@@ -60,14 +183,20 @@ def fetch_product_data_from_mysql() -> List[Dict]:
             COUNT(id) AS review_count,
             AVG(rating) AS avg_rating,
             AVG(sentiment_score) AS aggregate_sentiment_score,
+            COUNT(CASE WHEN rating <= 2 THEN 1 END) as negative_count,
+            COUNT(CASE WHEN rating >= 4 THEN 1 END) as positive_count,
             SUBSTRING(
                 GROUP_CONCAT(DISTINCT emotion_label ORDER BY emotion_label SEPARATOR ', '),
                 1, 200
             ) AS unique_emotions_summary,
             SUBSTRING(
-                GROUP_CONCAT(review_text ORDER BY id SEPARATOR ' | '),
-                1, 500
-            ) AS review_snippet
+                GROUP_CONCAT(CASE WHEN rating <= 2 THEN review_text END SEPARATOR ' | '),
+                1, 300
+            ) AS negative_review_samples,
+            SUBSTRING(
+                GROUP_CONCAT(CASE WHEN rating >= 4 THEN review_text END SEPARATOR ' | '),
+                1, 300
+            ) AS positive_review_samples
         FROM {TABLE_NAME}
         WHERE product_name IS NOT NULL 
         AND product_id IS NOT NULL
@@ -84,65 +213,147 @@ def fetch_product_data_from_mysql() -> List[Dict]:
         for row in result:
             (
                 product_name, brand, product_id, review_count, 
-                avg_rating, sentiment_score, emotions, review_snippet
+                avg_rating, sentiment_score, negative_count, positive_count,
+                emotions, negative_samples, positive_samples
             ) = row
             
             # Handle NULL values
             product_name = product_name or "Unknown Product"
             brand = brand or "Unknown Brand"
             emotions = emotions or "No emotion data"
-            review_snippet = review_snippet or "No reviews available"
+            negative_samples = negative_samples or "No negative reviews"
+            positive_samples = positive_samples or "No positive reviews"
             
-            # --- Format into RAG Document Structure ---
+            # Calculate sentiment ratio
+            sentiment_ratio = f"{positive_count} positive vs {negative_count} negative"
+            
             context_data = {
-                "id": str(product_id),  # Use product_id as string for consistency
+                "id": str(product_id),
                 "name": product_name,
                 "sku": product_id, 
                 "brand": brand,
-                "description": f"Brand: {brand}. Total Reviews: {review_count}. Review Snippet: {review_snippet}",
-                "marketplace_names": [product_name, brand, product_id],  # Include all searchable names
+                "description": (
+                    f"Brand: {brand}. Total Reviews: {review_count}. "
+                    f"Sentiment Distribution: {sentiment_ratio}. "
+                    f"Negative feedback samples: {negative_samples}. "
+                    f"Positive feedback samples: {positive_samples}"
+                ),
+                "marketplace_names": [product_name, brand, product_id],
                 "avg_rating": round(float(avg_rating), 2) if avg_rating else 0.0,
                 "sentiment_score": round(float(sentiment_score), 2) if sentiment_score else 0.0,
                 "review_count": review_count,
+                "positive_count": positive_count,
+                "negative_count": negative_count,
                 "emotion_summary": f"Key customer emotions: {emotions}. Based on {review_count} reviews.",
-                "full_context": f"{product_name} by {brand} (SKU: {product_id})"  # For search
+                "full_context": f"{product_name} by {brand} (SKU: {product_id})"
             }
             aggregated_products.append(context_data)
         
         if len(aggregated_products) == 0:
-            st.sidebar.warning("⚠️ No products found in database. Check your table data.")
+            st.sidebar.warning("⚠️ No products found in database.")
         else:
-            st.sidebar.success(f"✅ Successfully loaded {len(aggregated_products)} products from MySQL.")
+            st.sidebar.success(f"✅ Loaded {len(aggregated_products)} products from MySQL.")
         
         return aggregated_products
         
     except SQLAlchemyError as e:
-        st.error(f"❌ Error querying/aggregating data from MySQL: {e}")
+        st.error(f"❌ Error querying data: {e}")
         return [] 
-    except Exception as e:
-        st.error(f"❌ An unexpected error occurred during database processing: {e}")
-        return []
 
+# --- ENHANCED RAG WITH ANALYTICAL CONTEXT ---
 
-# --- RAG Core Functions (The "Brain") ---
-
-# 2. Vector Index Initialization and Ingestion - ENHANCED
-def create_product_knowledge_base(data: List[Dict], embeddings_model) -> Optional[List[Dict]]:
+def create_analytical_context(insights: Dict) -> str:
     """
-    Creates the knowledge base by combining product data into embeddable context chunks.
+    Creates a comprehensive analytical summary for the LLM.
+    """
+    if not insights:
+        return "No analytical insights available."
+    
+    context_parts = []
+    
+    # Overall Statistics
+    if 'overall' in insights and insights['overall']:
+        stats = insights['overall']
+        context_parts.append(
+            f"OVERALL STATISTICS:\n"
+            f"- Total Products: {stats.get('total_products', 0)}\n"
+            f"- Total Reviews: {stats.get('total_reviews', 0)}\n"
+            f"- Average Rating: {stats.get('avg_rating', 0):.2f}/5.0\n"
+            f"- Average Sentiment: {stats.get('avg_sentiment', 0):.2f}\n"
+            f"- Negative Reviews: {stats.get('negative_reviews', 0)}\n"
+            f"- Positive Reviews: {stats.get('positive_reviews', 0)}\n"
+        )
+    
+    # Top Complaints
+    if 'top_complaints' in insights and insights['top_complaints']:
+        context_parts.append("\nTOP COMPLAINED PRODUCTS (Most Negative Reviews):")
+        for i, product in enumerate(insights['top_complaints'][:5], 1):
+            context_parts.append(
+                f"{i}. {product['product_name']} by {product['Brand']}: "
+                f"{product['complaint_count']} complaints, "
+                f"avg rating {product['avg_rating']:.2f}, "
+                f"emotions: {product['common_emotions']}"
+            )
+    
+    # Best Products
+    if 'best_products' in insights and insights['best_products']:
+        context_parts.append("\nBEST RATED PRODUCTS (Highest Sentiment):")
+        for i, product in enumerate(insights['best_products'][:5], 1):
+            context_parts.append(
+                f"{i}. {product['product_name']} by {product['Brand']}: "
+                f"{product['review_count']} reviews, "
+                f"avg rating {product['avg_rating']:.2f}, "
+                f"sentiment {product['avg_sentiment']:.2f}, "
+                f"emotions: {product['common_emotions']}"
+            )
+    
+    # Emotion Analysis
+    if 'emotions' in insights and insights['emotions']:
+        context_parts.append("\nEMOTION ANALYSIS ACROSS ALL PRODUCTS:")
+        for emotion in insights['emotions'][:8]:
+            context_parts.append(
+                f"- {emotion['emotion_label']}: {emotion['count']} occurrences, "
+                f"avg rating {emotion['avg_rating']:.2f}"
+            )
+    
+    # Rating Distribution
+    if 'rating_distribution' in insights and insights['rating_distribution']:
+        context_parts.append("\nRATING DISTRIBUTION:")
+        for dist in insights['rating_distribution']:
+            context_parts.append(
+                f"- {dist['rating']} stars: {dist['count']} reviews ({dist['percentage']}%)"
+            )
+    
+    return "\n".join(context_parts)
+
+def create_product_knowledge_base(data: List[Dict], insights: Dict, embeddings_model) -> Optional[List[Dict]]:
+    """
+    Creates enhanced knowledge base with product data + analytical insights.
     """
     if not data:
-        st.error("No product data available to build knowledge base.")
+        st.error("No product data available.")
         return []
     
     if not embeddings_model:
-        st.error("Embedding model not ready. Cannot build knowledge base.")
+        st.error("Embedding model not ready.")
         return None
     
     knowledge_base = []
-    texts_to_embed = []
     
-    # Combine all relevant fields into a single context string (the "chunk")
+    # Add analytical summary as the first document
+    analytical_summary = create_analytical_context(insights)
+    knowledge_base.append({
+        "id": "ANALYTICAL_SUMMARY",
+        "name": "Database-Wide Analytics",
+        "brand": "System",
+        "sku": "ANALYTICS",
+        "context": f"COMPREHENSIVE DATABASE ANALYTICS:\n\n{analytical_summary}",
+        "searchable_text": "analytics insights statistics complaints best rated emotions distribution",
+        "product_data": {"type": "analytics"},
+        "embedding": [999] * 5  # High priority for analytics queries
+    })
+    
+    # Add individual product documents
     for item in data:
         context = (
             f"Product Name: {item['name']}. "
@@ -152,10 +363,12 @@ def create_product_knowledge_base(data: List[Dict], embeddings_model) -> Optiona
             f"Also known as: {', '.join(item.get('marketplace_names', []))}. "
             f"Average Customer Rating: {item['avg_rating']}/5.0. "
             f"Total Reviews: {item['review_count']}. "
+            f"Positive Reviews: {item['positive_count']}. "
+            f"Negative Reviews: {item['negative_count']}. "
             f"Sentiment Score: {item['sentiment_score']}. "
             f"{item['emotion_summary']}"
         )
-        texts_to_embed.append(context)
+        
         knowledge_base.append({
             "id": item['id'], 
             "name": item['name'],
@@ -163,31 +376,32 @@ def create_product_knowledge_base(data: List[Dict], embeddings_model) -> Optiona
             "sku": item['sku'],
             "context": context,
             "searchable_text": item['full_context'].lower(),
-            "product_data": item  # Store full product data for reference
+            "product_data": item,
+            "embedding": [len(context)] * 5
         })
-        
-
-    st.sidebar.info(f"🔨 Building searchable index for {len(data)} products...")
     
-    # --- Mocking the Embedding Process ---
-    for i, text in enumerate(texts_to_embed):
-        # In production: response = embeddings_model.embed_content(model="text-embedding-004", content=text)
-        mock_vector = [len(text) + i] * 5 
-        knowledge_base[i]['embedding'] = mock_vector
-        
-    st.sidebar.success(f"✅ Knowledge Base ready with {len(knowledge_base)} documents.")
+    st.sidebar.success(f"✅ Knowledge Base ready with {len(knowledge_base)} documents (including analytics)")
     return knowledge_base
 
-# 3. ENHANCED Retrieval Function (Better Similarity Search)
 def retrieve_relevant_context(query: str, knowledge_base: List[Dict], top_k: int = 3) -> str:
     """
-    Enhanced similarity search that properly scores and ranks all products.
+    Enhanced retrieval with analytical query detection.
     """
     if not knowledge_base:
-        return "No relevant product information found in the knowledge base."
+        return "No relevant information found."
     
     query_lower = query.lower()
     query_words = set(query_lower.split())
+    
+    # Detect if this is an analytical query
+    analytical_keywords = [
+        'analyze', 'analysis', 'statistics', 'compare', 'best', 'worst',
+        'complaint', 'complain', 'problem', 'issue', 'most', 'least',
+        'top', 'bottom', 'overall', 'summary', 'trend', 'insight',
+        'emotion', 'sentiment', 'rating', 'distribution', 'percentage'
+    ]
+    
+    is_analytical = any(keyword in query_lower for keyword in analytical_keywords)
     
     scored_documents = []
     
@@ -196,40 +410,46 @@ def retrieve_relevant_context(query: str, knowledge_base: List[Dict], top_k: int
         context_lower = doc['context'].lower()
         product_data = doc['product_data']
         
-        # Scoring system (more sophisticated)
+        # Boost analytical summary for analytical queries
+        if is_analytical and doc['id'] == 'ANALYTICAL_SUMMARY':
+            score += 200
         
-        # 1. Exact SKU/Product ID match (highest priority)
+        # Exact matches
         if doc['sku'].lower() in query_lower:
             score += 100
-        
-        # 2. Exact product name match
         if doc['name'].lower() in query_lower:
             score += 50
-        
-        # 3. Brand name match
         if doc['brand'].lower() in query_lower:
             score += 30
         
-        # 4. Partial name match (word-level)
+        # Word-level matches
         name_words = set(doc['name'].lower().split())
         matching_words = query_words.intersection(name_words)
         score += len(matching_words) * 10
         
-        # 5. Marketplace name aliases
+        # Marketplace names
         for alias in product_data.get('marketplace_names', []):
             if alias.lower() in query_lower:
                 score += 20
         
-        # 6. Context keyword match
+        # Context keyword match
         context_words = set(context_lower.split())
         context_matches = query_words.intersection(context_words)
         score += len(context_matches) * 2
         
-        # 7. Sentiment/emotion keywords
-        if any(word in query_lower for word in ['review', 'rating', 'sentiment', 'emotion', 'feedback']):
-            score += 5
+        # Specific query type boosts
+        if 'complaint' in query_lower or 'problem' in query_lower or 'issue' in query_lower:
+            if product_data.get('type') == 'analytics':
+                score += 50
+            elif product_data.get('negative_count', 0) > 0:
+                score += product_data.get('negative_count', 0) * 5
         
-        # Only include documents with some relevance
+        if 'best' in query_lower or 'recommend' in query_lower:
+            if product_data.get('type') == 'analytics':
+                score += 50
+            elif product_data.get('avg_rating', 0) >= 4:
+                score += int(product_data.get('avg_rating', 0) * 10)
+        
         if score > 0:
             scored_documents.append({
                 'doc': doc,
@@ -238,46 +458,51 @@ def retrieve_relevant_context(query: str, knowledge_base: List[Dict], top_k: int
                 'brand': doc['brand']
             })
     
-    # Sort by score (highest first)
+    # Sort by score
     scored_documents.sort(key=lambda x: x['score'], reverse=True)
     
     if not scored_documents:
-        return f"No relevant product information found for query: '{query}'. Try searching by product name, brand, or SKU."
+        return f"No relevant information found for: '{query}'"
     
     # Get top K results
     top_results = scored_documents[:top_k]
     
-    # Format context for LLM
+    # Format context
     context_chunks = []
     for i, result in enumerate(top_results, 1):
         context_chunks.append(
-            f"[Product {i}] {result['doc']['context']} "
+            f"[Document {i}] {result['doc']['context']} "
             f"(Relevance Score: {result['score']})"
         )
     
     formatted_context = "\n\n---\n\n".join(context_chunks)
     
-    # Add summary header
-    found_products = ", ".join([f"'{r['name']}' by {r['brand']}" for r in top_results[:3]])
-    header = f"Found {len(scored_documents)} matching products. Top matches: {found_products}\n\n"
+    # Add header
+    if is_analytical:
+        header = "ANALYTICAL QUERY DETECTED - Comprehensive insights included.\n\n"
+    else:
+        found_products = ", ".join([f"'{r['name']}'" for r in top_results[:3] if r['name'] != 'Database-Wide Analytics'])
+        header = f"Found relevant information. Top matches: {found_products}\n\n"
     
-    return f"{header}Product Knowledge Context (Retrieved via Similarity Search):\n\n{formatted_context}"
+    return f"{header}Product Knowledge Context:\n\n{formatted_context}"
 
-# 4. LLM Generation - WITH CLAUDE FALLBACK
 def generate_response(query: str, context: str):
-    """Calls the Gemini API (or Claude as fallback) to generate a grounded response."""
+    """Calls AI API with enhanced analytical prompt."""
     system_prompt = (
-        "You are a helpful and detailed RAG (Retrieval-Augmented Generation) Chatbot specializing in product support and information. "
-        "Your goal is to answer the user's question accurately, using ONLY the provided 'Product Knowledge Context'. "
-        "The context includes product details, customer ratings, sentiment analysis, and review summaries. "
-        "If the context does not contain the answer, state clearly that you do not have enough information. "
-        "Always be concise, professional, and friendly. "
-        "When comparing products, use the data provided to give objective comparisons."
+        "You are an advanced RAG (Retrieval-Augmented Generation) Chatbot specializing in product analytics and customer insights. "
+        "Your goal is to provide data-driven answers using ONLY the provided context. "
+        "The context includes individual product details, overall statistics, complaint analysis, sentiment data, and emotion patterns. "
+        "When asked analytical questions like 'what are the most common complaints' or 'which product is best', "
+        "use the ANALYTICAL SUMMARY section and compare products objectively. "
+        "Always cite specific numbers, ratings, and sentiment scores. "
+        "If comparing products, present data in a structured, easy-to-read format. "
+        "If the context lacks information, state this clearly. "
+        "Be professional, data-focused, and actionable in your responses."
     )
     
     user_query = f"{context}\n\nUser Question: {query}"
     
-    # Add throttling: wait at least 2 seconds between API calls
+    # Throttling
     if 'last_api_call' in st.session_state:
         elapsed = time.time() - st.session_state.last_api_call
         if elapsed < 2:
@@ -285,7 +510,7 @@ def generate_response(query: str, context: str):
     
     st.session_state.last_api_call = time.time()
     
-    # Try different Gemini models
+    # Try Gemini models
     models_to_try = [
         "gemini-1.5-flash-8b",
         "gemini-1.5-flash-latest",
@@ -307,31 +532,29 @@ def generate_response(query: str, context: str):
             
             if response.status_code == 200:
                 result = response.json()
-                text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Error: Could not parse model response.')
+                text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Error: Could not parse response.')
                 return text
-                
             elif response.status_code == 429:
-                print(f"Rate limit hit on {model_name}, trying next model...")
+                print(f"Rate limit on {model_name}")
                 time.sleep(3)
                 continue
             else:
-                print(f"API Error on {model_name}: Status {response.status_code}")
+                print(f"API Error on {model_name}: {response.status_code}")
                 continue
-                
         except Exception as e:
             print(f"Error with {model_name}: {e}")
             continue
     
-    # Try Claude API as fallback
+    # Try Claude fallback
     try:
         claude_key = st.secrets.get("ANTHROPIC_API_KEY", None)
         if claude_key:
-            print("Trying Claude API as fallback...")
+            print("Trying Claude API...")
             claude_url = "https://api.anthropic.com/v1/messages"
             
             claude_payload = {
                 "model": "claude-3-5-haiku-20241022",
-                "max_tokens": 1024,
+                "max_tokens": 1524,
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_query}]
             }
@@ -349,12 +572,11 @@ def generate_response(query: str, context: str):
                 text = result.get('content', [{}])[0].get('text', 'Error: Could not parse Claude response.')
                 return text
     except Exception as e:
-        print(f"Claude API fallback failed: {e}")
+        print(f"Claude API failed: {e}")
     
-    return ("⚠️ **API Rate Limit Exceeded**\n\n"
-            "All available AI models are currently rate-limited. Please wait 60 seconds and try again.")
+    return "⚠️ **API Rate Limit Exceeded**\n\nPlease wait 60 seconds and try again."
 
-# --- Streamlit UI and Logic ---
+# --- Streamlit UI ---
 
 if '__app_id' not in globals():
     __app_id = 'default-app-id'
@@ -365,86 +587,69 @@ if 'user_id' not in st.session_state:
     st.session_state.user_id = "local-dev-user"
     st.session_state.is_auth_ready = True
 
-st.set_page_config(page_title="Product RAG Chatbot", page_icon="🛍️", layout="wide")
-st.title("🛍️ Product Knowledge RAG Chatbot")
-st.caption("AI-powered product search and analysis using live MySQL data + Vector Search")
+st.set_page_config(page_title="Product Analytics RAG Chatbot", page_icon="📊", layout="wide")
+st.title("📊 Advanced Product Analytics RAG Chatbot")
+st.caption("AI-powered product analysis with sentiment, emotion, and complaint insights")
 
-# Initialize knowledge base in session state (CACHE IT)
+# Initialize knowledge base
 if 'knowledge_base' not in st.session_state or st.sidebar.button("🔄 Refresh Database"):
-    with st.spinner("Loading product data from database..."):
+    with st.spinner("Loading data and building analytics..."):
         product_data = fetch_product_data_from_mysql()
+        insights = fetch_analytical_insights()
         
-        st.session_state.embeddings_model = True  # Mock
-        
+        st.session_state.embeddings_model = True
         st.session_state.knowledge_base = create_product_knowledge_base(
-            product_data, 
-            st.session_state.get('embeddings_model')
+            product_data, insights, st.session_state.embeddings_model
         )
-        
-        # Store raw product data for display
         st.session_state.product_data = product_data
+        st.session_state.insights = insights
 
 if 'messages' not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "👋 Hello! I can help you with product information, ratings, and customer sentiment from our database. Ask me about any product by name, brand, or SKU!"}
+        {"role": "assistant", "content": "👋 Hello! I can analyze product reviews, complaints, sentiments, and provide data-driven insights. Try asking analytical questions!"}
     ]
 
-# Display chat messages
+# Display chat
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Handle user input
-if prompt := st.chat_input("Ask about a product..."):
+# Handle input
+if prompt := st.chat_input("Ask about products, complaints, or analytics..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Searching knowledge base..."):
-            
-            # Retrieve context
+        with st.spinner("🔍 Analyzing data..."):
             context = retrieve_relevant_context(prompt, st.session_state.knowledge_base, top_k=3)
             
-            # Show retrieved context (optional - can be hidden)
-            with st.expander("🔍 Retrieved Context (Debug View)"):
+            with st.expander("🔍 Retrieved Context"):
                 st.code(context, language='text')
 
-            # Generate response
-            with st.spinner("🤖 Generating response..."):
+            with st.spinner("🤖 Generating insights..."):
                 response = generate_response(prompt, context)
             
             st.markdown(response)
             
     st.session_state.messages.append({"role": "assistant", "content": response})
 
-# Sidebar with system info
+# Enhanced Sidebar
 st.sidebar.header("📊 System Status")
-st.sidebar.markdown(f"**App ID:** `{__app_id}`")
-st.sidebar.markdown(f"**User:** `{st.session_state.user_id}`")
 
-if st.session_state.get('knowledge_base'):
-    kb_count = len(st.session_state.knowledge_base)
-    st.sidebar.metric("Products in Knowledge Base", kb_count)
-    
-    if kb_count > 0:
-        st.sidebar.success("✅ Database Connected")
-    else:
-        st.sidebar.error("❌ No products loaded")
-else:
-    st.sidebar.warning("⚠️ Knowledge base not initialized")
+if st.session_state.get('insights'):
+    insights = st.session_state.insights
+    if 'overall' in insights:
+        st.sidebar.metric("Total Products", insights['overall'].get('total_products', 0))
+        st.sidebar.metric("Total Reviews", insights['overall'].get('total_reviews', 0))
+        st.sidebar.metric("Avg Rating", f"{insights['overall'].get('avg_rating', 0):.2f}/5.0")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("**💡 Try asking:**")
-st.sidebar.markdown("- Tell me about [product name]")
-st.sidebar.markdown("- What's the rating for [product]?")
-st.sidebar.markdown("- Compare [product A] and [product B]")
-st.sidebar.markdown("- Show products from [brand]")
-st.sidebar.markdown("- What do customers say about [product]?")
-
-# Optional: Show sample products
-if st.sidebar.checkbox("Show Sample Products"):
-    if st.session_state.get('product_data'):
-        st.sidebar.markdown("### Sample Products:")
-        for i, product in enumerate(st.session_state.product_data[:5], 1):
-            st.sidebar.markdown(f"{i}. **{product['name']}** by {product['brand']} ({product['review_count']} reviews)")
+st.sidebar.markdown("**💡 Try these analytical queries:**")
+st.sidebar.markdown("- What are the most common complaints?")
+st.sidebar.markdown("- Which backpack has the best rating?")
+st.sidebar.markdown("- Analyze customer emotions across products")
+st.sidebar.markdown("- Compare [product A] vs [product B]")
+st.sidebar.markdown("- What issues do customers face with [product]?")
+st.sidebar.markdown("- Show me the worst rated products")
+st.sidebar.markdown("- What percentage of reviews are positive?")
