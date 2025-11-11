@@ -3,3 +3,4 @@ sqlalchemy
 mysql-connector-python
 pandas
 google-generativeai
+requests
