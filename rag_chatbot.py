@@ -278,29 +278,24 @@ def generate_response(query: str, context: str):
                         time.sleep(2 ** attempt)
                     else:
                         break  # Try next model
+                        
+            except requests.exceptions.Timeout:
+                print(f"Timeout Error on {model_name} (Attempt {attempt+1})")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
                     
-        except requests.exceptions.Timeout:
-            print(f"Timeout Error (Attempt {attempt+1})")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                return f"Error: Request timed out after {max_retries} attempts."
-                
-        except requests.exceptions.RequestException as e:
-            print(f"Network Error (Attempt {attempt+1}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                return f"Error: Network failure after {max_retries} attempts. Details: {str(e)}"
-                
-        except Exception as e:
-            print(f"Unexpected Error (Attempt {attempt+1}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                return f"Error: Unexpected failure after {max_retries} attempts. Details: {str(e)}"
-                
-    return "Error: Failed to generate response."
+            except requests.exceptions.RequestException as e:
+                print(f"Network Error on {model_name} (Attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    
+            except Exception as e:
+                print(f"Unexpected Error on {model_name} (Attempt {attempt+1}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+    
+    # If all models failed
+    return "Error: All models are currently rate-limited or unavailable. Please try again in a few moments."
 
 # --- Streamlit UI and Logic ---
 
