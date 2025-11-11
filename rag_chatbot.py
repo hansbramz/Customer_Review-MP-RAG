@@ -7,9 +7,21 @@ import pandas as pd
 from sqlalchemy import create_engine, text, func 
 from sqlalchemy.exc import SQLAlchemyError
 # --- End New Database Imports ---
+# --- Load Secrets from Streamlit (st.secrets) ---
+try:
+    DB_USER = st.secrets["DB_USER"]
+    DB_PASS = st.secrets["DB_PASS"]
+    DB_HOST = st.secrets["DB_HOST"]
+    DB_PORT = st.secrets["DB_PORT"]
+    DB_DATABASE = st.secrets["DB_DATABASE"]
+    TABLE_NAME = st.secrets["TABLE_NAME"]
+    apiKey = st.secrets["GEMINI_API_KEY"] # Note: It was renamed to GEMINI_API_KEY in toml
+except KeyError as e:
+    st.error(f"Configuration error: Missing key {e} in secrets.toml. Please check your secrets file.")
+    st.stop()
+# --- End Load Secrets ---
 
-# --- Database Connection Details (Provided by User) ---
-
+This ensures the `initialize_mysql_engine()` function has all the required credentials (`DB_USER`, `DB_PASS`, etc.) defined before it attempts to build the connection string, resolving your initialization error.
 # --- Connection and Aggregation Functions ---
 
 def initialize_mysql_engine():
