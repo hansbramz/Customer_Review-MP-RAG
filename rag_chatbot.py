@@ -21,7 +21,7 @@ except KeyError as e:
     st.stop()
 # --- End Load Secrets ---
 
-This ensures the `initialize_mysql_engine()` function has all the required credentials (`DB_USER`, `DB_PASS`, etc.) defined before it attempts to build the connection string, resolving your initialization error.
+#This ensures the `initialize_mysql_engine()` function has all the required credentials (`DB_USER`, `DB_PASS`, etc.) defined before it attempts to build the connection string, resolving your initialization error.
 # --- Connection and Aggregation Functions ---
 
 def initialize_mysql_engine():
