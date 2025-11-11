@@ -194,9 +194,9 @@ def retrieve_relevant_context(query: str, knowledge_base: List[Dict], top_k: int
     formatted_context = "\n---\n".join(context_chunks)
     return f"Product Knowledge Context (Retrieved via Similarity Search):\n{formatted_context}"
 
-# 4. LLM Generation - FIXED VERSION USING REQUESTS
+# 4. LLM Generation - FIXED VERSION WITH CLAUDE FALLBACK
 def generate_response(query: str, context: str):
-    """Calls the Gemini API to generate a grounded response using requests library."""
+    """Calls the Gemini API (or Claude as fallback) to generate a grounded response."""
     # System Instruction: Guiding the LLM's persona and rules
     system_prompt = (
         "You are a helpful and detailed RAG (Retrieval-Augmented Generation) Chatbot specializing in product support and information. "
@@ -209,11 +209,19 @@ def generate_response(query: str, context: str):
     # User Query combining context and question
     user_query = f"{context}\n\nUser Question: {query}"
     
+    # Add throttling: wait at least 2 seconds between API calls
+    if 'last_api_call' in st.session_state:
+        elapsed = time.time() - st.session_state.last_api_call
+        if elapsed < 2:
+            time.sleep(2 - elapsed)
+    
+    st.session_state.last_api_call = time.time()
+    
     # Try different models in order of preference
     models_to_try = [
-        "gemini-1.5-flash-latest",  # Most stable
+        "gemini-1.5-flash-8b",  # Smallest, fastest, highest rate limit
+        "gemini-1.5-flash-latest",
         "gemini-1.5-flash",
-        "gemini-2.0-flash-exp"
     ]
     
     for model_name in models_to_try:
@@ -228,74 +236,83 @@ def generate_response(query: str, context: str):
             'Content-Type': 'application/json'
         }
 
-        # Exponential Backoff Retry Logic
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                # Use requests library instead of fetch_func
-                response = requests.post(
-                    apiUrl,
-                    headers=headers,
-                    json=payload,
-                    timeout=30  # 30 second timeout
-                )
+        # Try once per model with longer wait
+        try:
+            response = requests.post(
+                apiUrl,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            # Check for successful response
+            if response.status_code == 200:
+                result = response.json()
+                text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Error: Could not parse model response.')
+                return text
                 
-                # Check for successful response
-                if response.status_code == 200:
-                    result = response.json()
-                    text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Error: Could not parse model response.')
-                    return text
-                    
-                # Handle 429 Rate Limit specifically
-                elif response.status_code == 429:
-                    error_msg = f"Rate limit hit on {model_name} (Attempt {attempt+1})"
-                    print(error_msg)
-                    
-                    # Wait longer for rate limits
-                    wait_time = (2 ** attempt) * 3  # 3, 6, 12 seconds
-                    if attempt < max_retries - 1:
-                        print(f"Waiting {wait_time} seconds before retry...")
-                        time.sleep(wait_time)
-                    else:
-                        # Try next model instead of failing
-                        print(f"Rate limit persists on {model_name}, trying next model...")
-                        break
-                        
-                else:
-                    # Handle other API error response codes
-                    error_msg = f"API Error (Attempt {attempt+1}): Status {response.status_code}"
-                    print(error_msg)
-                    try:
-                        error_detail = response.json()
-                        print(f"Error details: {error_detail}")
-                        # If it's a permanent error (400, 401, 403), don't retry
-                        if response.status_code in [400, 401, 403]:
-                            return f"Error: API request failed - {error_detail.get('error', {}).get('message', 'Unknown error')}"
-                    except:
-                        pass
-                        
-                    if attempt < max_retries - 1:
-                        time.sleep(2 ** attempt)
-                    else:
-                        break  # Try next model
-                        
-            except requests.exceptions.Timeout:
-                print(f"Timeout Error on {model_name} (Attempt {attempt+1})")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                    
-            except requests.exceptions.RequestException as e:
-                print(f"Network Error on {model_name} (Attempt {attempt+1}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
-                    
-            except Exception as e:
-                print(f"Unexpected Error on {model_name} (Attempt {attempt+1}): {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+            # Handle 429 Rate Limit
+            elif response.status_code == 429:
+                print(f"Rate limit hit on {model_name}, trying next model...")
+                time.sleep(3)  # Wait before trying next model
+                continue
+                
+            else:
+                print(f"API Error on {model_name}: Status {response.status_code}")
+                try:
+                    error_detail = response.json()
+                    print(f"Error details: {error_detail}")
+                except:
+                    pass
+                continue
+                
+        except Exception as e:
+            print(f"Error with {model_name}: {e}")
+            continue
     
-    # If all models failed
-    return "Error: All models are currently rate-limited or unavailable. Please try again in a few moments."
+    # If all Gemini models failed, try Claude API as fallback
+    try:
+        # Check if Claude API key exists
+        claude_key = st.secrets.get("ANTHROPIC_API_KEY", None)
+        if claude_key:
+            print("Trying Claude API as fallback...")
+            claude_url = "https://api.anthropic.com/v1/messages"
+            
+            claude_payload = {
+                "model": "claude-3-5-haiku-20241022",
+                "max_tokens": 1024,
+                "system": system_prompt,
+                "messages": [{"role": "user", "content": user_query}]
+            }
+            
+            claude_headers = {
+                'Content-Type': 'application/json',
+                'x-api-key': claude_key,
+                'anthropic-version': '2023-06-01'
+            }
+            
+            response = requests.post(
+                claude_url,
+                headers=claude_headers,
+                json=claude_payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                text = result.get('content', [{}])[0].get('text', 'Error: Could not parse Claude response.')
+                return text
+    except Exception as e:
+        print(f"Claude API fallback failed: {e}")
+    
+    # If everything failed
+    return ("⚠️ **API Rate Limit Exceeded**\n\n"
+            "All available AI models are currently rate-limited. This typically happens when making too many requests in a short time.\n\n"
+            "**Solutions:**\n"
+            "1. Wait 60 seconds and try again\n"
+            "2. Upgrade to a paid Google AI API key for higher limits\n"
+            "3. Add an Anthropic API key (ANTHROPIC_API_KEY) to secrets.toml for Claude fallback\n\n"
+            "Your question was received, but I cannot generate a response right now.")
 
 # --- Streamlit UI and Logic ---
 
