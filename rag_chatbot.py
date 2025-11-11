@@ -106,7 +106,10 @@ def fetch_analytical_insights() -> Dict:
                     emotion_label,
                     COUNT(*) as count,
                     AVG(rating) as avg_rating,
-                    GROUP_CONCAT(DISTINCT product_name SEPARATOR ' | ' LIMIT 5) as sample_products
+                    SUBSTRING(
+                        GROUP_CONCAT(DISTINCT product_name ORDER BY product_name SEPARATOR ' | '),
+                        1, 200
+                    ) as sample_products
                 FROM {TABLE_NAME}
                 WHERE emotion_label IS NOT NULL
                 GROUP BY emotion_label
