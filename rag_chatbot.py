@@ -2,8 +2,6 @@ import streamlit as st
 import json
 import time
 from typing import List, Dict, Optional
-from google.generativeai import types
-from google import genai
 # --- New Database Imports ---
 import pandas as pd
 from sqlalchemy import create_engine, text, func 
