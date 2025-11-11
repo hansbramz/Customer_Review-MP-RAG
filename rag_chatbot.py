@@ -209,52 +209,75 @@ def generate_response(query: str, context: str):
     # User Query combining context and question
     user_query = f"{context}\n\nUser Question: {query}"
     
-    model_name = "gemini-2.0-flash-exp"
-    apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={apiKey}"
+    # Try different models in order of preference
+    models_to_try = [
+        "gemini-1.5-flash-latest",  # Most stable
+        "gemini-1.5-flash",
+        "gemini-2.0-flash-exp"
+    ]
+    
+    for model_name in models_to_try:
+        apiUrl = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={apiKey}"
 
-    payload = {
-        "contents": [{"parts": [{"text": user_query}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-    }
+        payload = {
+            "contents": [{"parts": [{"text": user_query}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+        }
 
-    headers = {
-        'Content-Type': 'application/json'
-    }
+        headers = {
+            'Content-Type': 'application/json'
+        }
 
-    # Exponential Backoff Retry Logic
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Use requests library instead of fetch_func
-            response = requests.post(
-                apiUrl,
-                headers=headers,
-                json=payload,
-                timeout=30  # 30 second timeout
-            )
-            
-            # Check for successful response
-            if response.status_code == 200:
-                result = response.json()
-                text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Error: Could not parse model response.')
-                return text
-            else:
-                # Handle API error response codes
-                error_msg = f"API Error (Attempt {attempt+1}): Status {response.status_code}"
-                print(error_msg)
-                try:
-                    error_detail = response.json()
-                    print(f"Error details: {error_detail}")
-                    # If it's a permanent error (400, 401, 403), don't retry
-                    if response.status_code in [400, 401, 403]:
-                        return f"Error: API request failed - {error_detail.get('error', {}).get('message', 'Unknown error')}"
-                except:
-                    pass
+        # Exponential Backoff Retry Logic
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Use requests library instead of fetch_func
+                response = requests.post(
+                    apiUrl,
+                    headers=headers,
+                    json=payload,
+                    timeout=30  # 30 second timeout
+                )
+                
+                # Check for successful response
+                if response.status_code == 200:
+                    result = response.json()
+                    text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', 'Error: Could not parse model response.')
+                    return text
                     
-                if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                # Handle 429 Rate Limit specifically
+                elif response.status_code == 429:
+                    error_msg = f"Rate limit hit on {model_name} (Attempt {attempt+1})"
+                    print(error_msg)
+                    
+                    # Wait longer for rate limits
+                    wait_time = (2 ** attempt) * 3  # 3, 6, 12 seconds
+                    if attempt < max_retries - 1:
+                        print(f"Waiting {wait_time} seconds before retry...")
+                        time.sleep(wait_time)
+                    else:
+                        # Try next model instead of failing
+                        print(f"Rate limit persists on {model_name}, trying next model...")
+                        break
+                        
                 else:
-                    return f"Error: Failed to get response from LLM after {max_retries} attempts. Last status: {response.status_code}"
+                    # Handle other API error response codes
+                    error_msg = f"API Error (Attempt {attempt+1}): Status {response.status_code}"
+                    print(error_msg)
+                    try:
+                        error_detail = response.json()
+                        print(f"Error details: {error_detail}")
+                        # If it's a permanent error (400, 401, 403), don't retry
+                        if response.status_code in [400, 401, 403]:
+                            return f"Error: API request failed - {error_detail.get('error', {}).get('message', 'Unknown error')}"
+                    except:
+                        pass
+                        
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                    else:
+                        break  # Try next model
                     
         except requests.exceptions.Timeout:
             print(f"Timeout Error (Attempt {attempt+1})")
