@@ -1,6 +1,7 @@
 import streamlit as st
 import json
 import time
+import requests  # ADD THIS - proper HTTP library
 from typing import List, Dict, Optional
 # --- New Database Imports ---
 import pandas as pd
@@ -15,26 +16,23 @@ try:
     DB_PORT = st.secrets["DB_PORT"]
     DB_DATABASE = st.secrets["DB_DATABASE"]
     TABLE_NAME = st.secrets["TABLE_NAME"]
-    apiKey = st.secrets["GEMINI_API_KEY"] # Note: It was renamed to GEMINI_API_KEY in toml
+    apiKey = st.secrets["GEMINI_API_KEY"]
 except KeyError as e:
     st.error(f"Configuration error: Missing key {e} in secrets.toml. Please check your secrets file.")
     st.stop()
 # --- End Load Secrets ---
 
-#This ensures the `initialize_mysql_engine()` function has all the required credentials (`DB_USER`, `DB_PASS`, etc.) defined before it attempts to build the connection string, resolving your initialization error.
 # --- Connection and Aggregation Functions ---
 
 def initialize_mysql_engine():
     """Initializes and returns the SQLAlchemy engine using user's credentials."""
     try:
-        # Use mysql+mysqlconnector driver. You'll need 'pip install mysql-connector-python'
         connection_string = (
             f"mysql+mysqlconnector://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
         )
         engine = create_engine(connection_string)
         return engine
     except Exception as e:
-        # Log the error but return None to signal failure
         print(f"ERROR: Could not initialize MySQL Engine. Error: {e}")
         return None
 
@@ -102,7 +100,6 @@ def fetch_product_data_from_mysql() -> List[Dict]:
         return aggregated_products
         
     except SQLAlchemyError as e:
-        # Handles connection errors, table errors, or query errors
         st.error(f"Error querying/aggregating data from MySQL: {e}. Cannot fetch live data.")
         return [] 
     except Exception as e:
@@ -113,7 +110,7 @@ def fetch_product_data_from_mysql() -> List[Dict]:
 # --- RAG Core Functions (The "Brain") ---
 
 # 2. Vector Index Initialization and Ingestion
-def create_product_knowledge_base(data: List[Dict], embeddings_model) -> Optional[Dict]:
+def create_product_knowledge_base(data: List[Dict], embeddings_model) -> Optional[List[Dict]]:
     """
     Creates the knowledge base by combining product data into embeddable context chunks.
     """
@@ -142,8 +139,6 @@ def create_product_knowledge_base(data: List[Dict], embeddings_model) -> Optiona
     
     # --- Mocking the Embedding Process ---
     for i, text in enumerate(texts_to_embed):
-        # In production, use: response = embeddings_model.embed_content(model="text-embedding-004", content=text)
-        # For demo, use a simple mock vector:
         mock_vector = [len(text) + i] * 5 
         knowledge_base[i]['embedding'] = mock_vector
         
@@ -158,10 +153,6 @@ def retrieve_relevant_context(query: str, knowledge_base: List[Dict], top_k: int
     """
     if not knowledge_base:
         return "No relevant product information found in the knowledge base."
-
-    # In a real RAG system:
-    # 1. Embed the user's query: query_vector = embeddings_model.embed_content(query)['embedding']
-    # 2. Perform Cosine Similarity Search: vector_db.search(query_vector, k=top_k) 
     
     # --- MOCK SIMILARITY SEARCH FOR DEMO ---
     query_lower = query.lower()
@@ -179,7 +170,6 @@ def retrieve_relevant_context(query: str, knowledge_base: List[Dict], top_k: int
             score = 1 
         
         # Find the corresponding product data entry to check marketplace names
-        # Note: This lookup is simplified and assumes product names/SKUs are unique keys
         product_entry = next((p for p in current_product_data if str(p.get('id')) == str(doc['id']) or p.get('name') == doc['name']), None)
         
         # Check for marketplace name match (simulating a high score for "fuzzy" match)
@@ -204,15 +194,15 @@ def retrieve_relevant_context(query: str, knowledge_base: List[Dict], top_k: int
     formatted_context = "\n---\n".join(context_chunks)
     return f"Product Knowledge Context (Retrieved via Similarity Search):\n{formatted_context}"
 
-# 4. LLM Generation (using the existing, correct API pattern)
+# 4. LLM Generation - FIXED VERSION USING REQUESTS
 def generate_response(query: str, context: str):
-    """Calls the Gemini API to generate a grounded response."""
+    """Calls the Gemini API to generate a grounded response using requests library."""
     # System Instruction: Guiding the LLM's persona and rules
     system_prompt = (
-        "You are a helpful and detailed RAG (Retrieval-Augmented Generation) Chatbot specializing in product support and information."
-        "Your goal is to answer the user's question accurately, using ONLY the provided 'Product Knowledge Context'."
-        "The context includes product details, customer ratings, and sentiment analysis." 
-        "If the context does not contain the answer, state clearly that you do not have enough information."
+        "You are a helpful and detailed RAG (Retrieval-Augmented Generation) Chatbot specializing in product support and information. "
+        "Your goal is to answer the user's question accurately, using ONLY the provided 'Product Knowledge Context'. "
+        "The context includes product details, customer ratings, and sentiment analysis. " 
+        "If the context does not contain the answer, state clearly that you do not have enough information. "
         "Always be concise, professional, and friendly."
     )
     
@@ -227,20 +217,21 @@ def generate_response(query: str, context: str):
         "systemInstruction": {"parts": [{"text": system_prompt}]},
     }
 
+    headers = {
+        'Content-Type': 'application/json'
+    }
+
     # Exponential Backoff Retry Logic
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            # Check for fetch_func availability in the environment 
-            fetch_func = st.session_state.get('fetch_func')
-            if not fetch_func:
-                return "Error: Fetch function not defined in environment."
-                
-            response = fetch_func(apiUrl, {
-                "method": 'POST',
-                "headers": {'Content-Type': 'application/json'},
-                "body": json.dumps(payload),
-            })
+            # Use requests library instead of fetch_func
+            response = requests.post(
+                apiUrl,
+                headers=headers,
+                json=payload,
+                timeout=30  # 30 second timeout
+            )
             
             # Check for successful response
             if response.status_code == 200:
@@ -249,17 +240,43 @@ def generate_response(query: str, context: str):
                 return text
             else:
                 # Handle API error response codes
-                print(f"API Error (Attempt {attempt+1}): Status {response.status_code}")
+                error_msg = f"API Error (Attempt {attempt+1}): Status {response.status_code}"
+                print(error_msg)
+                try:
+                    error_detail = response.json()
+                    print(f"Error details: {error_detail}")
+                    # If it's a permanent error (400, 401, 403), don't retry
+                    if response.status_code in [400, 401, 403]:
+                        return f"Error: API request failed - {error_detail.get('error', {}).get('message', 'Unknown error')}"
+                except:
+                    pass
+                    
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)
                 else:
-                    return f"Error: Failed to get response from LLM after {max_retries} attempts."
-        except Exception as e:
-            print(f"Network/Serialization Error (Attempt {attempt+1}): {e}")
+                    return f"Error: Failed to get response from LLM after {max_retries} attempts. Last status: {response.status_code}"
+                    
+        except requests.exceptions.Timeout:
+            print(f"Timeout Error (Attempt {attempt+1})")
             if attempt < max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                return f"Error: Network failure after {max_retries} attempts."
+                return f"Error: Request timed out after {max_retries} attempts."
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Network Error (Attempt {attempt+1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                return f"Error: Network failure after {max_retries} attempts. Details: {str(e)}"
+                
+        except Exception as e:
+            print(f"Unexpected Error (Attempt {attempt+1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                return f"Error: Unexpected failure after {max_retries} attempts. Details: {str(e)}"
+                
     return "Error: Failed to generate response."
 
 # --- Streamlit UI and Logic ---
@@ -278,16 +295,12 @@ st.set_page_config(page_title="Product RAG Chatbot (MySQL/Vector Search)")
 st.title("🛍️ Product Knowledge Chatbot")
 st.caption("Answers grounded in **live** MySQL data (simulated via Vector Search)")
 
-# Check for fetch_func availability (Crucial for API calls)
-if 'fetch_func' not in st.session_state:
-    st.session_state.fetch_func = lambda url, params: type('', (object,), {'status_code': 500, 'json': lambda: {'error': 'Fetch function not available.'}})()
-
 # Initialize knowledge base in session state
 if 'knowledge_base' not in st.session_state:
-    product_data = fetch_product_data_from_mysql() # Call the live data fetcher
+    product_data = fetch_product_data_from_mysql()
     
     # Initialize embedding model here (using a mock/placeholder)
-    st.session_state.embeddings_model = True # Mocking existence
+    st.session_state.embeddings_model = True
     
     st.session_state.knowledge_base = create_product_knowledge_base(
         product_data, 
@@ -298,7 +311,6 @@ if 'messages' not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Hello! I can provide product details, ratings, and customer sentiment, fetched live from the database. Ask me about a product!"}
     ]
-    
 
 # Display chat messages
 for message in st.session_state.messages:
@@ -335,10 +347,10 @@ if prompt := st.chat_input("Ask a question about a product..."):
 st.sidebar.header("System Status")
 st.sidebar.markdown(f"**App ID:** `{__app_id}`")
 st.sidebar.markdown(f"**User ID:** `{st.session_state.user_id}`")
-st.sidebar.markdown(f"**Total Products in KB:** `{len(st.session_state.knowledge_base)}`")
+st.sidebar.markdown(f"**Total Products in KB:** `{len(st.session_state.knowledge_base) if st.session_state.knowledge_base else 0}`")
 
 st.sidebar.markdown("""
 ---
 **Product Data Source**
-Data is aggregated live from the `productsentiment.ProductReview` table. If the product count above is 0, check the database connection.
+Data is aggregated live from the MySQL table. If the product count above is 0, check the database connection.
 """)
